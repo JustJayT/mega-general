@@ -1,0 +1,6 @@
+.env
+node_modules
+channels.json
+test-channels.json
+blacklist.json
+mode.json
