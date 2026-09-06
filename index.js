@@ -67,7 +67,7 @@ const client = new Client({
   ],
   partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
-
+require('./roles.js')(client);
 const webhookCache = new Map();
 
 // messageId -> [{ channelId, messageId }, ...] linking every copy together.
