@@ -1,0 +1,27 @@
+{
+  "1142945652834304100": {
+    "channelId": "1545960756405870653",
+    "messageId": "1545961381583659030",
+    "title": "🚨 Join a Team! 🚨",
+    "roles": [
+      {
+        "roleId": "1534005757266231326",
+        "subtitle": "# Academics Team🔬",
+        "description": "### Description:\nAre you interested in research? Dissecting artificial intelligence? Working at the forefront of AI research here at ASU? Join the Academics Team to get directly involved with research through papers, projects, and collaboration with ASU labs!\n\n### Directives:\nWorking with ASU’s MPS Lab - Tackling Autonomous Self-Driving Vehicles with the Waymo 2025 Challenge Dataset",
+        "button": "Join Academics Team"
+      },
+      {
+        "roleId": "1534005781328822393",
+        "subtitle": "# Projects Team 💻",
+        "description": "### Description:\nAre you a hands-on developer or experienced engineer? If you want to create actual AI applications that will be directly used and deployed, get involved as we build a variety of projects that span the entire AI field!\n\n### Directives:\nSparkyAI - ASU's all-in-one RAG chatbot\nJarvis Arm - Robotic arm that brings the vision, language, and action all together into a project that represents this club. \nAiPedia - An AIS developed database containing educational content on AI subjects.",
+        "button": "Join Projects"
+      },
+      {
+        "roleId": "1534007600100675594",
+        "subtitle": "# Collaborations Team 🤝",
+        "description": "### Description:\nThis team works with industry connections on projects and sponsored problem-statements, eventually deploying to the public. Get involved with collaborations between other clubs through hackathons, panels, and joint events! Join if you want to expand your portfolio while interacting with businesses and other clubs.  \n\n### Directives:\nABA Clinic Development - Medical-grade clinician assistant working with synthetic data to produce a paper and product.",
+        "button": "Join Collaborations"
+      }
+    ]
+  }
+}
