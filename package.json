@@ -4,7 +4,12 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js",
+    "restart": "pm2 restart megageneral --update-env || pm2 start index.js --name megageneral",
+    "update": "git pull && npm install && npm run restart",
+    "logs": "pm2 logs megageneral",
+    "stop": "pm2 stop megageneral",
+    "status": "pm2 status megageneral"
   },
   "keywords": [],
   "author": "",
