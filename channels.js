@@ -54,6 +54,10 @@ function add(id, label) {
     console.log('Usage: node channels.js add <channelId> <tag>');
     return;
   }
+  if (!/^\d{17,20}$/.test(id)) {
+    console.log(`"${id}" doesn't look like a channel ID (right-click the channel -> Copy Channel ID).`);
+    return;
+  }
   const channels = load();
   if (channels.some((c) => c.id === id)) {
     console.log(`Channel ${id} is already linked.`);
@@ -151,4 +155,4 @@ Examples:
   node channels.js tag 983046488546480129 AIS
   node channels.js toggle
 `);
-}
+}

@@ -1,2 +1,4 @@
 node_modules/
 .env
+bridge-data.json
+bridge-data.json.tmp

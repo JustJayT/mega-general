@@ -65,28 +65,39 @@ const commands = [
   },
 ];
 
-async function registerCommands(client) {
-  for (const [, guild] of client.guilds.cache) {
-    try {
-      await guild.commands.set(commands);
-    } catch (err) {
-      console.error(`role command register failed in ${guild.name}:`, err.message);
-    }
-  }
+// ── Panel rendering ───────────────────────────────────────────────
+const EMBED_DESC_LIMIT = 4096; // Discord's hard cap on an embed description
+
+// Subtitle without markdown heading marks, for buttons/menus/messages.
+function plainName(subtitle) {
+  return (subtitle || '').replace(/^#{1,3}\s+/, '').trim() || 'Team';
 }
 
-// ── Panel rendering ───────────────────────────────────────────────
+// A subtitle that's already a markdown heading ("# Team") is left alone;
+// wrapping it in ** would stop Discord rendering it as a heading.
+function formatSubtitle(subtitle) {
+  return /^#{1,3}\s/.test(subtitle) ? subtitle : `**${subtitle}**`;
+}
+
+function panelDescription(roles) {
+  return roles.length
+    ? roles
+        .map((r) => `${formatSubtitle(r.subtitle)}\n${r.description}`)
+        .join('\n\n────────────────────\n\n')
+    : '_No teams yet. Use /roleadd._';
+}
+
+function tooLongMessage(roles) {
+  const len = panelDescription(roles).length;
+  if (len <= EMBED_DESC_LIMIT) return null;
+  return `That would make the panel ${len} characters, over Discord's ${EMBED_DESC_LIMIT} limit. Shorten a description and try again.`;
+}
+
 function buildPanelMessage(panel) {
   const embed = new EmbedBuilder()
-    .setTitle(panel.title || 'Join a Team!')
+    .setTitle((panel.title || 'Join a Team!').slice(0, 256))
     .setColor(0x5865f2)
-    .setDescription(
-      panel.roles.length
-        ? panel.roles
-            .map((r) => `**${r.subtitle}**\n${r.description}`)
-            .join('\n\n────────────────────\n\n')
-        : '_No teams yet. Use /roleadd._'
-    );
+    .setDescription(panelDescription(panel.roles).slice(0, EMBED_DESC_LIMIT));
 
   const rows = [];
   let row = new ActionRowBuilder();
@@ -160,14 +171,16 @@ async function repostPanel(client, guildId, targetChannelId) {
   return true;
 }
 
+// Reposting can take longer than Discord's 3-second reply window, so defer first.
 async function handleDisplay(interaction) {
   const panel = getPanel(interaction.guildId);
   if (!panel || !panel.roles.length) {
     return interaction.reply({ content: 'No team panel exists yet — use /roleadd first.', ...eph });
   }
+  await interaction.deferReply(eph);
   // Re-post in the panel's existing home channel.
   await repostPanel(interaction.client, interaction.guildId, panel.channelId);
-  return interaction.reply({ content: `Panel re-posted in <#${panel.channelId}>.`, ...eph });
+  return interaction.editReply(`Panel re-posted in <#${panel.channelId}>.`);
 }
 
 async function handleMove(interaction) {
@@ -175,8 +188,9 @@ async function handleMove(interaction) {
   if (!panel || !panel.roles.length) {
     return interaction.reply({ content: 'No team panel exists yet — use /roleadd first.', ...eph });
   }
+  await interaction.deferReply(eph);
   await repostPanel(interaction.client, interaction.guildId, interaction.channelId);
-  return interaction.reply({ content: `Panel moved to <#${interaction.channelId}>.`, ...eph });
+  return interaction.editReply(`Panel moved to <#${interaction.channelId}>.`);
 }
 
 // ── /roleadd ──────────────────────────────────────────────────────
@@ -251,16 +265,19 @@ async function handleAddModal(interaction) {
     panel = { channelId: interaction.channelId, messageId: null, title: 'Join a Team!', roles: [] };
   }
 
-  const idx = panel.roles.findIndex((r) => r.roleId === roleId);
-  if (idx === -1) panel.roles.push(entry);
-  else panel.roles[idx] = entry;
+  const roles = [...panel.roles];
+  const idx = roles.findIndex((r) => r.roleId === roleId);
+  if (idx === -1) roles.push(entry);
+  else roles[idx] = entry;
 
+  const tooLong = tooLongMessage(roles);
+  if (tooLong) return interaction.reply({ content: tooLong, ...eph });
+
+  panel.roles = roles;
+  await interaction.deferReply(eph);
   savePanel(interaction.guildId, panel);
   await renderPanel(interaction.client, interaction.guildId);
-  await interaction.reply({
-    content: `Saved **${entry.subtitle}**. Run /roleadd again to add another team.`,
-    ...eph,
-  });
+  await interaction.editReply(`Saved **${plainName(entry.subtitle)}**. Run /roleadd again to add another team.`);
 }
 
 // ── Join / Leave buttons ──────────────────────────────────────────
@@ -268,7 +285,11 @@ async function handleJoin(interaction) {
   const roleId = interaction.customId.split(':')[1];
   const panel = getPanel(interaction.guildId);
   const info = panel?.roles.find((r) => r.roleId === roleId);
-  const name = info?.subtitle || interaction.guild.roles.cache.get(roleId)?.name || 'that team';
+  const name = info ? plainName(info.subtitle) : interaction.guild.roles.cache.get(roleId)?.name || 'that team';
+
+  if (!info) {
+    return interaction.reply({ content: 'That team is no longer on the panel.', ...eph });
+  }
 
   if (interaction.member.roles.cache.has(roleId)) {
     return interaction.reply({ content: `You're already in **${name}**.`, ...eph });
@@ -296,7 +317,7 @@ async function handleLeaveButton(interaction) {
   const select = new StringSelectMenuBuilder()
     .setCustomId('team_leave_select')
     .setPlaceholder('Which team do you want to leave?')
-    .addOptions(held.map((r) => ({ label: r.subtitle.slice(0, 100), value: r.roleId })));
+    .addOptions(held.map((r) => ({ label: plainName(r.subtitle).slice(0, 100), value: r.roleId })));
 
   await interaction.reply({
     content: 'Which team do you want to leave?',
@@ -308,7 +329,8 @@ async function handleLeaveButton(interaction) {
 async function handleLeaveSelect(interaction) {
   const roleId = interaction.values[0];
   const panel = getPanel(interaction.guildId);
-  const name = panel?.roles.find((r) => r.roleId === roleId)?.subtitle || 'that team';
+  const info = panel?.roles.find((r) => r.roleId === roleId);
+  const name = info ? plainName(info.subtitle) : 'that team';
 
   try {
     await interaction.member.roles.remove(roleId);
@@ -321,12 +343,17 @@ async function handleLeaveSelect(interaction) {
 // ── /roleaddmodify editor ─────────────────────────────────────────
 function buildModifyUI(panel, selected) {
   const options = panel.roles.map((r) => ({
-    label: r.subtitle.slice(0, 100),
+    label: plainName(r.subtitle).slice(0, 100),
     description: `Button: ${r.button}`.slice(0, 100),
     value: r.roleId,
     default: r.roleId === selected,
   }));
-  options.push({ label: 'Panel title', description: panel.title, value: '__title__', default: selected === '__title__' });
+  options.push({
+    label: 'Panel title',
+    description: (panel.title || 'Join a Team!').slice(0, 100), // menu descriptions max out at 100 chars
+    value: '__title__',
+    default: selected === '__title__',
+  });
 
   const select = new StringSelectMenuBuilder()
     .setCustomId('modify_select')
@@ -370,7 +397,7 @@ async function handleModifySelect(interaction) {
 async function handleModifyButton(interaction) {
   const [action, value] = interaction.customId.split(':');
   const panel = getPanel(interaction.guildId);
-  if (!panel) return;
+  if (!panel) return interaction.reply({ content: 'Panel is gone.', ...eph });
 
   if (action === 'modify_edit') {
     if (value === '__title__') {
@@ -405,22 +432,24 @@ async function handleModifyButton(interaction) {
     return interaction.showModal(modal);
   }
 
+  // Answer the click first (3-second window), then update the panel.
   if (action === 'modify_remove') {
     panel.roles = panel.roles.filter((r) => r.roleId !== value);
     savePanel(interaction.guildId, panel);
-    await renderPanel(interaction.client, interaction.guildId);
-    return interaction.update({ content: 'Team removed.', components: buildModifyUI(panel, null) });
+    await interaction.update({ content: 'Team removed.', components: buildModifyUI(panel, null) });
+    return renderPanel(interaction.client, interaction.guildId);
   }
 
   if (action === 'modify_up' || action === 'modify_down') {
     const i = panel.roles.findIndex((r) => r.roleId === value);
     const j = action === 'modify_up' ? i - 1 : i + 1;
-    if (i !== -1 && j >= 0 && j < panel.roles.length) {
+    const moved = i !== -1 && j >= 0 && j < panel.roles.length;
+    if (moved) {
       [panel.roles[i], panel.roles[j]] = [panel.roles[j], panel.roles[i]];
       savePanel(interaction.guildId, panel);
-      await renderPanel(interaction.client, interaction.guildId);
     }
-    return interaction.update({ content: 'Order updated.', components: buildModifyUI(panel, value) });
+    await interaction.update({ content: 'Order updated.', components: buildModifyUI(panel, value) });
+    if (moved) await renderPanel(interaction.client, interaction.guildId);
   }
 }
 
@@ -429,31 +458,32 @@ async function handleModifyModal(interaction) {
   if (!panel) return interaction.reply({ content: 'Panel is gone.', ...eph });
 
   if (interaction.customId === 'modify_title_modal') {
-    panel.title = interaction.fields.getTextInputValue('title').trim();
+    panel.title = interaction.fields.getTextInputValue('title').trim() || 'Join a Team!';
   } else {
     const roleId = interaction.customId.split(':')[1];
     const r = panel.roles.find((x) => x.roleId === roleId);
-    if (r) {
-      r.subtitle = interaction.fields.getTextInputValue('subtitle').trim();
-      r.description = interaction.fields.getTextInputValue('description').trim();
-      r.button = interaction.fields.getTextInputValue('button').trim();
-    }
+    if (!r) return interaction.reply({ content: 'That team is gone.', ...eph });
+    const updated = {
+      ...r,
+      subtitle: interaction.fields.getTextInputValue('subtitle').trim(),
+      description: interaction.fields.getTextInputValue('description').trim(),
+      button: interaction.fields.getTextInputValue('button').trim(),
+    };
+    const roles = panel.roles.map((x) => (x.roleId === roleId ? updated : x));
+    const tooLong = tooLongMessage(roles);
+    if (tooLong) return interaction.reply({ content: tooLong, ...eph });
+    panel.roles = roles;
   }
 
+  await interaction.deferReply(eph);
   savePanel(interaction.guildId, panel);
   await renderPanel(interaction.client, interaction.guildId);
-  await interaction.reply({ content: 'Panel updated.', ...eph });
+  await interaction.editReply('Panel updated.');
 }
 
 // ── Wire up ───────────────────────────────────────────────────────
+// Commands are registered by index.js together with the moderation commands.
 module.exports = function setupRoles(client) {
-  client.once(Events.ClientReady, () => registerCommands(client));
-  client.on(Events.GuildCreate, (guild) =>
-    guild.commands.set(commands).catch((err) =>
-      console.error(`role command register failed in ${guild.name}:`, err.message)
-    )
-  );
-
   client.on(Events.InteractionCreate, async (interaction) => {
     try {
       if (interaction.isChatInputCommand()) {
@@ -481,9 +511,13 @@ module.exports = function setupRoles(client) {
       }
     } catch (err) {
       console.error('Role interaction error:', err.message);
-      if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
+      if (!interaction.isRepliable()) return;
+      if (interaction.deferred) {
+        interaction.editReply('Something went wrong.').catch(() => {});
+      } else if (!interaction.replied) {
         interaction.reply({ content: 'Something went wrong.', ...eph }).catch(() => {});
       }
     }
   });
 };
+module.exports.commands = commands;
