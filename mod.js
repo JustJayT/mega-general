@@ -4,7 +4,10 @@
 //   /bridgeroles ...      server managers: pick which roles here may use "Delete everywhere"
 //   Delete everywhere     right-click a message -> Apps: delete it and every copy in every server
 //
-// Bridge admins = user IDs listed in admins.json, e.g. ["123456789012345678"].
+//   /admin add|remove|list      bridge admins only: manage the admin list
+//   /server add|remove|tag|list bridge admins only: manage which channels are bridged
+//
+// Bridge admins = the bot's owner + user IDs in admins.json (managed with /admin).
 // Allowed delete roles per server live in mod-roles.json (managed with /bridgeroles).
 const fs = require('fs');
 const path = require('path');
@@ -22,11 +25,35 @@ function readJson(file, fallback) {
   }
 }
 
+// The bot's owner (from the Developer Portal) is always an admin; filled in at startup.
+const ownerIds = new Set();
+
+function readAdmins() {
+  const list = readJson(ADMINS_FILE, []);
+  return Array.isArray(list) ? list.map(String) : [];
+}
+
+function writeAdmins(list) {
+  fs.writeFileSync(ADMINS_FILE, JSON.stringify(list, null, 2) + '\n');
+}
+
 // Read fresh every time so editing admins.json takes effect without a restart.
 function isAdmin(userId) {
-  const list = readJson(ADMINS_FILE, []);
-  return Array.isArray(list) && list.map(String).includes(userId);
+  return ownerIds.has(userId) || readAdmins().includes(userId);
 }
+
+// Permissions the bot needs in a bridged channel, with friendly names.
+const NEEDED_PERMS = [
+  ['ViewChannel', 'View Channel'],
+  ['SendMessages', 'Send Messages'],
+  ['ReadMessageHistory', 'Read Message History'],
+  ['ManageWebhooks', 'Manage Webhooks'],
+  ['ManageMessages', 'Manage Messages'],
+  ['AddReactions', 'Add Reactions'],
+  ['UseExternalEmojis', 'Use External Emojis'],
+  ['AttachFiles', 'Attach Files'],
+  ['EmbedLinks', 'Embed Links'],
+];
 
 function getModRoles(guildId) {
   return readJson(MOD_ROLES_FILE, {})[guildId] || [];
@@ -96,6 +123,58 @@ const commands = [
     type: 3, // message context menu (right-click a message -> Apps)
     default_member_permissions: String(PermissionFlagsBits.ManageMessages),
   },
+  {
+    name: 'admin',
+    description: 'Manage who can use the bridge admin commands',
+    default_member_permissions: String(PermissionFlagsBits.ManageMessages),
+    options: [
+      {
+        name: 'add',
+        description: 'Make someone a bridge admin',
+        type: 1,
+        options: [{ name: 'user', description: 'Who to add', type: 6, required: true }],
+      },
+      {
+        name: 'remove',
+        description: 'Remove a bridge admin',
+        type: 1,
+        options: [{ name: 'user', description: 'Start typing a name or ID', type: 3, required: true, autocomplete: true }],
+      },
+      { name: 'list', description: 'Show the bridge admins', type: 1 },
+    ],
+  },
+  {
+    name: 'server',
+    description: 'Manage which channels are bridged together',
+    default_member_permissions: String(PermissionFlagsBits.ManageMessages),
+    options: [
+      {
+        name: 'add',
+        description: 'Bridge a channel in this server',
+        type: 1,
+        options: [
+          { name: 'tag', description: 'Short name shown after usernames, e.g. AIS', type: 3, required: true, max_length: 30 },
+          { name: 'channel', description: 'Channel to bridge (default: this one)', type: 7, required: false, channel_types: [0, 5] },
+        ],
+      },
+      {
+        name: 'remove',
+        description: 'Stop bridging a channel (any server)',
+        type: 1,
+        options: [{ name: 'channel', description: 'Start typing a tag or server name', type: 3, required: true, autocomplete: true }],
+      },
+      {
+        name: 'tag',
+        description: "Change a bridged channel's tag",
+        type: 1,
+        options: [
+          { name: 'channel', description: 'Start typing a tag or server name', type: 3, required: true, autocomplete: true },
+          { name: 'tag', description: 'New tag', type: 3, required: true, max_length: 30 },
+        ],
+      },
+      { name: 'list', description: 'Show every bridged channel', type: 1 },
+    ],
+  },
 ];
 
 module.exports = function setupMod(client, api) {
@@ -109,9 +188,39 @@ module.exports = function setupMod(client, api) {
     return m ? m[0] : null;
   }
 
+  // "AIS — Server Name (#general)" for a bridged channel ID.
+  function channelLabel(c) {
+    const ch = client.channels.cache.get(String(c.id));
+    const where = ch ? `${ch.guild?.name ?? 'Unknown server'} (#${ch.name})` : `channel ${c.id} (bot can't see it)`;
+    return `${c.label || 'no tag'} — ${where}`;
+  }
+
+  function adminLabel(id) {
+    const u = client.users.cache.get(id);
+    const a = api.authors.get(id);
+    return u ? `${u.globalName || u.username} (@${u.username})` : a ? `${a.name} (@${a.username})` : `user ${id}`;
+  }
+
   async function handleAutocomplete(interaction) {
     if (!isAdmin(interaction.user.id)) return interaction.respond([]);
     const q = interaction.options.getFocused().toLowerCase().trim();
+
+    if (interaction.commandName === 'server') {
+      const choices = api.channels
+        .list()
+        .map((c) => ({ name: channelLabel(c).slice(0, 100), value: String(c.id) }))
+        .filter((c) => !q || c.name.toLowerCase().includes(q) || c.value.includes(q))
+        .slice(0, 25);
+      return interaction.respond(choices);
+    }
+
+    if (interaction.commandName === 'admin') {
+      const choices = readAdmins()
+        .map((id) => ({ name: `${adminLabel(id)} • ${id}`.slice(0, 100), value: id }))
+        .filter((c) => !q || c.name.toLowerCase().includes(q))
+        .slice(0, 25);
+      return interaction.respond(choices);
+    }
 
     const pool =
       interaction.commandName === 'unban'
@@ -232,10 +341,116 @@ module.exports = function setupMod(client, api) {
     );
   }
 
+  async function handleAdmin(interaction) {
+    if (!isAdmin(interaction.user.id)) {
+      return interaction.reply({ content: 'Only bridge admins can use /admin.', ...eph });
+    }
+    const sub = interaction.options.getSubcommand();
+    const admins = readAdmins();
+
+    if (sub === 'list') {
+      const lines = [
+        ...[...ownerIds].map((id) => `• <@${id}> (bot owner, always an admin)`),
+        ...admins.filter((id) => !ownerIds.has(id)).map((id) => `• <@${id}>`),
+      ];
+      return interaction.reply({
+        content: `**Bridge admins:**\n${lines.join('\n') || 'None yet.'}`,
+        allowedMentions: { parse: [] },
+        ...eph,
+      });
+    }
+
+    if (sub === 'add') {
+      const user = interaction.options.getUser('user');
+      if (user.bot) return interaction.reply({ content: "Bots can't be admins.", ...eph });
+      if (isAdmin(user.id)) return interaction.reply({ content: `<@${user.id}> is already an admin.`, ...eph });
+      writeAdmins([...admins, user.id]);
+      console.log(`[ADMIN] ${interaction.user.tag} added ${user.tag} [${user.id}] as admin.`);
+      return interaction.reply({ content: `✅ <@${user.id}> is now a bridge admin.`, ...eph });
+    }
+
+    if (sub === 'remove') {
+      const id = resolveUserId(interaction.options.getString('user'));
+      if (id && ownerIds.has(id)) {
+        return interaction.reply({ content: "The bot owner is always an admin and can't be removed.", ...eph });
+      }
+      if (!id || !admins.includes(id)) return interaction.reply({ content: "That user isn't an admin.", ...eph });
+      writeAdmins(admins.filter((x) => x !== id));
+      console.log(`[ADMIN] ${interaction.user.tag} removed admin [${id}].`);
+      return interaction.reply({ content: `Removed <@${id}> from the bridge admins.`, ...eph });
+    }
+  }
+
+  async function handleServer(interaction) {
+    if (!isAdmin(interaction.user.id)) {
+      return interaction.reply({ content: 'Only bridge admins can use /server.', ...eph });
+    }
+    const sub = interaction.options.getSubcommand();
+    const mode = api.channels.mode();
+    const modeNote = mode === 'TEST' ? ' (test mode list)' : '';
+
+    if (sub === 'list') {
+      const list = api.channels.list();
+      const text = list.length ? list.map((c, i) => `${i + 1}. ${channelLabel(c)}`).join('\n') : 'No channels bridged yet.';
+      return interaction.reply({ content: `**Bridged channels — ${mode}:**\n${text}`, ...eph });
+    }
+
+    if (sub === 'add') {
+      const channel = interaction.options.getChannel('channel') || interaction.channel;
+      const tag = interaction.options.getString('tag').trim();
+      if (!channel || !channel.isTextBased?.() || channel.isThread?.()) {
+        return interaction.reply({ content: 'Pick a normal text channel (not a thread).', ...eph });
+      }
+      if (!api.channels.add(channel.id, tag)) {
+        return interaction.reply({ content: `<#${channel.id}> is already bridged. Use /server tag to rename it.`, ...eph });
+      }
+
+      // Warn about anything that would stop the bridge working in that channel.
+      const perms = channel.permissionsFor?.(client.user);
+      const missing = NEEDED_PERMS.filter(([flag]) => !perms?.has(PermissionFlagsBits[flag])).map(([, name]) => name);
+      console.log(`[SERVER] ${interaction.user.tag} bridged #${channel.name} in ${interaction.guild?.name} as "${tag}".`);
+      return interaction.reply({
+        content:
+          `✅ <#${channel.id}> is now bridged as **${tag}**${modeNote}.` +
+          (missing.length ? `\n⚠️ The bot is missing these permissions there: **${missing.join(', ')}**.` : ''),
+        ...eph,
+      });
+    }
+
+    const id = String(interaction.options.getString('channel')).match(/\d{17,20}/)?.[0];
+    const existing = api.channels.list().find((c) => String(c.id) === id);
+    if (!existing) return interaction.reply({ content: "That channel isn't bridged. Pick one from the list.", ...eph });
+
+    if (sub === 'remove') {
+      api.channels.remove(id);
+      console.log(`[SERVER] ${interaction.user.tag} unbridged ${channelLabel(existing)}.`);
+      return interaction.reply({ content: `Stopped bridging **${channelLabel(existing)}**${modeNote}.`, ...eph });
+    }
+
+    if (sub === 'tag') {
+      const tag = interaction.options.getString('tag').trim();
+      api.channels.setTag(id, tag);
+      return interaction.reply({ content: `Tag changed: **${existing.label || 'no tag'}** → **${tag}**.`, ...eph });
+    }
+  }
+
+  // The bot owner (or every member of the owning team) is always an admin.
+  client.once(Events.ClientReady, async () => {
+    try {
+      const app = await client.application.fetch();
+      if (app.owner?.members) for (const id of app.owner.members.keys()) ownerIds.add(id);
+      else if (app.owner?.id) ownerIds.add(app.owner.id);
+    } catch (err) {
+      console.error('Could not look up the bot owner:', err.message);
+    }
+  });
+
   client.on(Events.InteractionCreate, async (interaction) => {
     try {
       if (interaction.isAutocomplete()) {
-        if (['ban', 'unban'].includes(interaction.commandName)) return await handleAutocomplete(interaction);
+        if (['ban', 'unban', 'admin', 'server'].includes(interaction.commandName)) {
+          return await handleAutocomplete(interaction);
+        }
         return;
       }
       if (interaction.isMessageContextMenuCommand()) {
@@ -246,6 +461,8 @@ module.exports = function setupMod(client, api) {
         if (interaction.commandName === 'ban') return await handleBan(interaction);
         if (interaction.commandName === 'unban') return await handleUnban(interaction);
         if (interaction.commandName === 'bridgeroles') return await handleBridgeRoles(interaction);
+        if (interaction.commandName === 'admin') return await handleAdmin(interaction);
+        if (interaction.commandName === 'server') return await handleServer(interaction);
       }
     } catch (err) {
       console.error('Moderation command error:', err.message);

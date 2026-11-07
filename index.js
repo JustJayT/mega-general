@@ -588,6 +588,20 @@ client.on(Events.MessageBulkDelete, (messages) => {
 const setupRoles = require('./roles.js');
 const setupMod = require('./mod.js');
 
+// Read/write the channel list for the current mode (same files channels.js uses).
+function readChannelList() {
+  try {
+    const data = JSON.parse(fs.readFileSync(activeChannelsFile(), 'utf8'));
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
+function writeChannelList(list) {
+  fs.writeFileSync(activeChannelsFile(), JSON.stringify(list, null, 2) + '\n');
+  loadChannels(); // apply right away instead of waiting for the file watcher
+}
+
 setupRoles(client);
 setupMod(client, {
   groups,
@@ -595,6 +609,32 @@ setupMod(client, {
   authors,
   deleteGroupEverywhere,
   deleteManyGroups,
+  channels: {
+    mode: () => (inTestMode() ? 'TEST' : 'LIVE'),
+    list: readChannelList,
+    add(id, label) {
+      const list = readChannelList();
+      if (list.some((c) => String(c.id) === id)) return false;
+      list.push({ id, label: label || '' });
+      writeChannelList(list);
+      return true;
+    },
+    remove(id) {
+      const list = readChannelList();
+      const next = list.filter((c) => String(c.id) !== id);
+      if (next.length === list.length) return false;
+      writeChannelList(next);
+      return true;
+    },
+    setTag(id, label) {
+      const list = readChannelList();
+      const ch = list.find((c) => String(c.id) === id);
+      if (!ch) return false;
+      ch.label = label;
+      writeChannelList(list);
+      return true;
+    },
+  },
   blacklist: {
     has: (id) => BLACKLIST.has(id),
     list: () => [...BLACKLIST],
